@@ -10,6 +10,7 @@ import type {
   StartMappingRequest,
   StartMappingResponse,
   MappingStatus,
+  LEDPixelRequest,
 } from '../types';
 
 /**
@@ -99,6 +100,18 @@ export async function startMapping(
  */
 export async function getMappingStatus(): Promise<MappingStatus> {
   return apiRequest<MappingStatus>('/status');
+}
+
+/**
+ * Set individual LED color for drawing
+ */
+export async function setLEDPixel(
+  request: LEDPixelRequest
+): Promise<{ ok: boolean }> {
+  return apiRequest<{ ok: boolean }>('/draw/led', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
 }
 
 /**

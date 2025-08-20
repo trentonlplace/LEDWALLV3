@@ -206,6 +206,12 @@ class ManualSetReq(BaseModel):
     i: int
     b: float  # brightness 0..1
 
+class LEDPixelReq(BaseModel):
+    index: int
+    r: int  # 0-255
+    g: int  # 0-255 
+    b: int  # 0-255
+
 # --------------- Device helpers -------------
 def _ensure_connected() -> None:
     if not sm.is_open():
@@ -217,7 +223,7 @@ def send_led_command(i: int, brightness: float):
     _ensure_connected()
     # Convert brightness (0..1) to RGB values (0..255)
     rgb_val = int(brightness * 255)
-    sm.set_pixel(i, rgb_val, rgb_val, rgb_val)  # White LED at specified brightness
+    sm.set_pixel(i, 0, rgb_val, 0)  # Green LED at specified brightness
 
 def all_off():
     """Turn off all LEDs"""
@@ -247,8 +253,8 @@ def device_power(req: PowerReq):
         _ensure_connected()
         # Set a moderate brightness when turning on
         sm.set_brightness(128)
-        # Turn all LEDs to white at moderate brightness
-        sm.set_all(128, 128, 128)
+        # Turn all LEDs to green at moderate brightness
+        sm.set_all(0, 128, 0)
     else:
         all_off()
     return {"ok": True}
@@ -258,6 +264,20 @@ def device_set(req: ManualSetReq):
     """Manually set a single LED"""
     send_led_command(req.i, req.b)
     return {"ok": True}
+
+@app.post("/draw/led")
+def draw_led(req: LEDPixelReq):
+    """Set a single LED with RGB color for drawing"""
+    try:
+        _ensure_connected()
+        success = sm.set_pixel(req.index, req.r, req.g, req.b)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to set LED color")
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LED control error: {str(e)}")
 
 @app.get("/status")
 def status():
@@ -316,31 +336,47 @@ def _mapping_worker(req: StartMapRequest):
 
     print(f"Attempting to open camera with index {CAM_INDEX}...")
     
-    # Wait a bit for frontend to release camera
-    time.sleep(1)
+    # Wait longer for frontend to release camera
+    print("Waiting 3 seconds for frontend to release camera...")
+    time.sleep(3)
     
-    try:
-        cap = cv2.VideoCapture(CAM_INDEX)
-        if not cap.isOpened():
-            print("Failed to open camera - may be in use by frontend")
-            status_update(running=False, done=True)
-            return
-        
-        print("Camera opened successfully")
-        
-        # Test if we can actually read a frame
-        ret, test_frame = cap.read()
-        if not ret:
-            print("Camera opened but cannot read frames")
-            cap.release()
-            status_update(running=False, done=True)
-            return
-        
-        print(f"Camera working, frame size: {test_frame.shape}")
-        
-    except Exception as e:
-        print(f"Camera error: {e}")
-        status_update(running=False, done=True)
+    # Try multiple times to open camera
+    cap = None
+    for attempt in range(5):
+        try:
+            print(f"Camera attempt {attempt + 1}/5")
+            cap = cv2.VideoCapture(CAM_INDEX)
+            if not cap.isOpened():
+                if cap:
+                    cap.release()
+                print(f"Attempt {attempt + 1}: Failed to open camera - may be in use")
+                time.sleep(1)  # Wait 1 second between attempts
+                continue
+            
+            print("Camera opened successfully")
+            
+            # Test if we can actually read a frame
+            ret, test_frame = cap.read()
+            if not ret:
+                print(f"Attempt {attempt + 1}: Camera opened but cannot read frames")
+                cap.release()
+                cap = None
+                time.sleep(1)  # Wait 1 second between attempts
+                continue
+            
+            print(f"Camera working, frame size: {test_frame.shape}")
+            break  # Success, exit retry loop
+            
+        except Exception as e:
+            print(f"Attempt {attempt + 1}: Camera error: {e}")
+            if cap:
+                cap.release()
+                cap = None
+            time.sleep(1)  # Wait 1 second between attempts
+    
+    if cap is None:
+        print("Failed to access camera after 5 attempts")
+        status_update(running=False, done=True, status="error", message="Failed to access camera after 5 attempts. Please ensure the camera is not in use by another application.")
         return
 
     coords: List[Tuple[float, float]] = []
@@ -349,7 +385,7 @@ def _mapping_worker(req: StartMapRequest):
     ok, frame = cap.read()
     if not ok:
         cap.release()
-        status_update(running=False, done=True)
+        status_update(running=False, done=True, status="error", message="Failed to read from camera. Please check camera connection.")
         return
     H, W = frame.shape[:2]
     status_update(w=W, h=H, roi=req.roi.dict())
