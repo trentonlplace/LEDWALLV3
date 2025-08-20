@@ -1,19 +1,20 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Card, CardHeader, CardContent, CardTitle } from './ui/card';
-import type { ROI, LEDCoordinate, MappingStatus } from '../types';
+import type { ROI, LEDCoordinate, MappingStatus, RGBColor } from '../types';
 import { CAMERA_CONFIG, LED_CONFIG, UI_CONFIG, ERROR_MESSAGES, SUCCESS_MESSAGES } from '../config/constants';
 import {
   requestCameraAccess,
-  stopCameraStream,
   validateVideoResolution,
   calculateScaling,
 } from '../utils/camera';
 import {
   connectDevice as apiConnectDevice,
   toggleLEDPower,
-  startMapping as apiStartMapping,
   getMappingStatus,
+  setLEDPixel,
 } from '../utils/api';
+import DrawingCanvas from './DrawingCanvas';
+import DrawingToolsPanel from './DrawingToolsPanel';
 
 const CameraPanel: React.FC = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -28,11 +29,19 @@ const CameraPanel: React.FC = () => {
   const [isMapping, setIsMapping] = useState(false);
   const [mappingStatus, setMappingStatus] = useState<MappingStatus | null>(null);
   const [mappingCompleted, setMappingCompleted] = useState(false);
+  const [mappedCoordinates, setMappedCoordinates] = useState<LEDCoordinate[]>([]);
+  const [originalVideoSize, setOriginalVideoSize] = useState<{ width: number; height: number }>({ width: 1280, height: 720 });
   
   const [roi, setRoi] = useState<ROI | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPoint, setStartPoint] = useState<{ x: number; y: number } | null>(null);
   const [isVideoReady, setIsVideoReady] = useState(false);
+
+  // Drawing system state
+  const [isDrawingMode, setIsDrawingMode] = useState(false);
+  const [showLEDGrid, setShowLEDGrid] = useState(true);
+  const [brushSize, setBrushSize] = useState(5);
+  const [currentColor, setCurrentColor] = useState<RGBColor>({ r: 255, g: 0, b: 0 });
 
   // Start webcam
   const startWebcam = useCallback(async () => {
@@ -75,15 +84,32 @@ const CameraPanel: React.FC = () => {
 
   // Stop webcam
   const stopWebcam = useCallback(() => {
-    stopCameraStream(streamRef.current);
+    console.log('🔧 STOPPING WEBCAM: Comprehensive camera cleanup');
+    
+    // Stop all tracks in the stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => {
+        console.log('📹 Stopping track:', track.kind, track.label);
+        track.stop();
+      });
+    }
+    
+    // Clear stream reference
     streamRef.current = null;
+    
+    // Clear video element
     if (videoRef.current) {
       videoRef.current.srcObject = null;
+      videoRef.current.load(); // Force reload to clear any cached streams
     }
+    
+    // Update state
     setIsVideoActive(false);
     setIsVideoReady(false);
     setIsInitializing(false);
     setRoi(null); // Clear ROI when stopping video
+    
+    console.log('✅ WEBCAM STOPPED: Camera fully released');
   }, []);
 
   // Connect to device
@@ -207,6 +233,10 @@ const CameraPanel: React.FC = () => {
       // Stop webcam before backend takes control
       stopWebcam();
       
+      // Wait longer for camera to be fully released
+      console.log('⏳ WAITING: 2 seconds for camera to be fully released');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
       console.log('🌐 API CALL: Starting mapping request');
       const requestPayload = {
         roi: normalizedRoi,
@@ -263,6 +293,7 @@ const CameraPanel: React.FC = () => {
         console.log('🔍 DEBUG: Sample coordinates:', coordinates.slice(0, 5));
         drawMappingResults(coordinates);
       } else if (status.status === 'error') {
+        console.log('❌ MAPPING ERROR: Status indicates error:', status.message);
         setIsMapping(false);
         setMappingCompleted(false);
         alert(`Mapping failed: ${status.message || 'Unknown error'}`);
@@ -282,6 +313,15 @@ const CameraPanel: React.FC = () => {
   // Draw mapping results on canvas
   const drawMappingResults = (coordinates: LEDCoordinate[]) => {
     console.log('🎨 DRAW MAPPING RESULTS: Starting to draw...');
+    
+    // Store coordinates and video size for drawing mode
+    setMappedCoordinates(coordinates);
+    if (videoRef.current) {
+      setOriginalVideoSize({
+        width: videoRef.current.videoWidth || 1280,
+        height: videoRef.current.videoHeight || 720
+      });
+    }
     
     const canvas = canvasRef.current;
     if (!canvas) {
@@ -347,6 +387,49 @@ const CameraPanel: React.FC = () => {
     console.log(`🎉 DRAWING COMPLETE: Drew ${drawnCount} LEDs out of ${coordinates.length} total`);
   };
 
+  // Handle LED updates from drawing
+  const handleLEDsUpdate = useCallback(async (ledUpdates: { index: number; color: RGBColor }[]) => {
+    if (!isConnected) return;
+
+    try {
+      // Send LED updates in batches to avoid overwhelming the serial connection
+      for (const update of ledUpdates) {
+        await setLEDPixel({
+          index: update.index,
+          r: update.color.r,
+          g: update.color.g,
+          b: update.color.b
+        });
+        // Small delay between commands to prevent serial buffer overflow
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    } catch (error) {
+      console.error('Failed to update LEDs:', error);
+    }
+  }, [isConnected]);
+
+  // Drawing mode handlers
+  const handleDrawingModeToggle = useCallback(() => {
+    console.log('🎨 DRAWING MODE TOGGLE: Current mode:', isDrawingMode, '→ New mode:', !isDrawingMode);
+    setIsDrawingMode(!isDrawingMode);
+    if (!isDrawingMode) {
+      console.log('💡 Entering drawing mode - turning off all LEDs');
+      // Turn off all LEDs when entering drawing mode
+      handleLEDsUpdate(mappedCoordinates.map((_, index) => ({ 
+        index, 
+        color: { r: 0, g: 0, b: 0 } 
+      })));
+    }
+  }, [isDrawingMode, mappedCoordinates, handleLEDsUpdate]);
+
+  const handleClearAll = useCallback(() => {
+    // Turn off all LEDs
+    handleLEDsUpdate(mappedCoordinates.map((_, index) => ({ 
+      index, 
+      color: { r: 0, g: 0, b: 0 } 
+    })));
+  }, [mappedCoordinates, handleLEDsUpdate]);
+
   // Mouse handlers for ROI selection
   const handleMouseDown = (e: React.MouseEvent<HTMLVideoElement>) => {
     if (isMapping) return;
@@ -359,6 +442,14 @@ const CameraPanel: React.FC = () => {
     // Get mouse position relative to video element (display coordinates)
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
+    
+    console.log('🖱️ MOUSE DOWN: Display coords:', { mouseX, mouseY });
+    console.log('📐 Video rect:', { 
+      left: rect.left, 
+      top: rect.top, 
+      width: rect.width, 
+      height: rect.height 
+    });
     
     // Store display coordinates, we'll convert to video coordinates when needed
     setStartPoint({ x: mouseX, y: mouseY });
@@ -383,6 +474,16 @@ const CameraPanel: React.FC = () => {
     // Get current mouse position relative to video element (display coordinates)
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
+    
+    // Debug logging
+    if (Math.random() < 0.1) { // Log only 10% of the time to reduce console spam
+      console.log('🖱️ MOUSE MOVE:', {
+        client: { x: e.clientX, y: e.clientY },
+        relative: { x: mouseX, y: mouseY },
+        videoSize: { width: video.videoWidth, height: video.videoHeight },
+        displaySize: { width: rect.width, height: rect.height }
+      });
+    }
     
     // Calculate display coordinates for ROI rectangle
     const displayX = Math.min(startPoint.x, mouseX);
@@ -425,21 +526,21 @@ const CameraPanel: React.FC = () => {
 
   // Draw ROI overlay on video
   useEffect(() => {
-    if (!roi || !videoRef.current) return;
+    if (!roi || !videoRef.current || !canvasRef.current) return;
 
     const canvas = canvasRef.current;
     const video = videoRef.current;
-    if (!canvas || !video) return;
-
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
     // Get the actual display dimensions
     const rect = video.getBoundingClientRect();
     
-    // Set canvas size to match video display size
+    // Set canvas size to match video display size exactly
     canvas.width = rect.width;
     canvas.height = rect.height;
+    canvas.style.width = `${rect.width}px`;
+    canvas.style.height = `${rect.height}px`;
     
     // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -455,13 +556,20 @@ const CameraPanel: React.FC = () => {
     const displayWidth = roi.width * inverseScaleX;
     const displayHeight = roi.height * inverseScaleY;
     
+    console.log('🎨 DRAWING ROI:', {
+      videoCoords: { x: roi.x, y: roi.y, w: roi.width, h: roi.height },
+      displayCoords: { x: displayX, y: displayY, w: displayWidth, h: displayHeight },
+      scales: { scaleX, scaleY, inverseScaleX, inverseScaleY },
+      canvasSize: { width: canvas.width, height: canvas.height }
+    });
+    
     // Draw ROI rectangle
     ctx.strokeStyle = UI_CONFIG.ROI_STROKE_COLOR;
     ctx.lineWidth = UI_CONFIG.ROI_STROKE_WIDTH;
     ctx.strokeRect(displayX, displayY, displayWidth, displayHeight);
   }, [roi]);
 
-  // Auto-connect to device on mount
+  // Auto-connect to device and check mapping status on mount
   useEffect(() => {
     let mounted = true;
     
@@ -479,9 +587,73 @@ const CameraPanel: React.FC = () => {
         // Auto-connect failed, manual connection required
       }
     };
+
+    // Check if there's already a completed mapping on mount
+    const checkInitialMappingStatus = async () => {
+      if (!mounted) return;
+      
+      try {
+        console.log('🔍 MOUNT CHECK: Checking for existing completed mapping...');
+        const status = await getMappingStatus();
+        console.log('🔍 MOUNT STATUS:', status);
+        
+        if (status.done && !status.running && status.coords && status.coords.length > 0) {
+          console.log('🎉 MOUNT DETECTION: Found completed mapping! Transitioning to drawing mode...');
+          
+          // Set the mapping completion state
+          setMappingCompleted(true);
+          setIsMapping(false);
+          
+          // Convert coordinates and set ROI from stored data
+          const coordinates = status.coords.map(([x, y]: [number, number]) => ({ x, y }));
+          setMappedCoordinates(coordinates);
+          
+          // Restore ROI from backend if available
+          if (status.roi) {
+            const restoredRoi: ROI = {
+              x: status.roi.x * (status.w || 1280),
+              y: status.roi.y * (status.h || 720),
+              width: status.roi.w * (status.w || 1280),
+              height: status.roi.h * (status.h || 720)
+            };
+            setRoi(restoredRoi);
+            console.log('🔍 MOUNT ROI: Restored ROI:', restoredRoi);
+          } else {
+            // Set a default ROI if none is available
+            const defaultRoi: ROI = {
+              x: 0,
+              y: 0,
+              width: status.w || 1280,
+              height: status.h || 720
+            };
+            setRoi(defaultRoi);
+            console.log('🔍 MOUNT ROI: Using default ROI:', defaultRoi);
+          }
+          
+          // Set original video dimensions from backend
+          if (status.w && status.h) {
+            setOriginalVideoSize({ width: status.w, height: status.h });
+            console.log('🔍 MOUNT VIDEO: Set video dimensions:', status.w, 'x', status.h);
+          }
+          
+          // Draw the mapping results
+          drawMappingResults(coordinates);
+          
+          console.log('✅ MOUNT COMPLETE: Successfully transitioned to drawing mode with', coordinates.length, 'LEDs');
+        } else {
+          console.log('ℹ️ MOUNT STATUS: No completed mapping found, showing normal interface');
+        }
+      } catch (error) {
+        console.error('⚠️ MOUNT ERROR: Failed to check initial mapping status:', error);
+        // Don't show error to user, just continue with normal flow
+      }
+    };
     
-    // Start auto-connect after a short delay to let backend initialize
-    const timer = setTimeout(autoConnect, CAMERA_CONFIG.AUTO_CONNECT_DELAY);
+    // Start auto-connect and status check after a short delay to let backend initialize
+    const timer = setTimeout(async () => {
+      await autoConnect();
+      await checkInitialMappingStatus();
+    }, CAMERA_CONFIG.AUTO_CONNECT_DELAY);
     
     return () => {
       mounted = false;
@@ -516,33 +688,46 @@ const CameraPanel: React.FC = () => {
               />
               <canvas
                 ref={canvasRef}
-                className="absolute top-0 left-0 w-full h-full pointer-events-none"
-                style={{ display: isVideoActive && !isMapping ? 'block' : 'none' }}
+                className="absolute top-0 left-0 pointer-events-none"
+                style={{ 
+                  display: isVideoActive && !isMapping ? 'block' : 'none',
+                  width: '100%',
+                  height: '100%'
+                }}
               />
               
               {(isMapping || mappingCompleted) ? (
-                <div className="w-full aspect-video bg-black rounded-lg flex items-center justify-center relative">
-                  <canvas
-                    ref={canvasRef}
-                    className="w-full h-full"
-                    width={1280}
-                    height={720}
-                  />
-                  <div className="absolute top-4 left-4 text-white">
-                    {isMapping && (
-                      <div>
-                        <p>Mapping in progress...</p>
-                        {mappingStatus?.current_led && mappingStatus?.total_leds && (
-                          <p>LED {mappingStatus.current_led} of {mappingStatus.total_leds}</p>
-                        )}
+                <div className="w-full bg-black rounded-lg relative">
+                  {isMapping ? (
+                    <div className="w-full aspect-video bg-black rounded-lg flex items-center justify-center relative">
+                      <canvas
+                        ref={canvasRef}
+                        className="w-full h-full"
+                        width={1280}
+                        height={720}
+                      />
+                      <div className="absolute top-4 left-4 text-white">
+                        <div>
+                          <p>Mapping in progress...</p>
+                          {mappingStatus?.current_led && mappingStatus?.total_leds && (
+                            <p>LED {mappingStatus.current_led} of {mappingStatus.total_leds}</p>
+                          )}
+                        </div>
                       </div>
-                    )}
-                    {mappingCompleted && (
-                      <div>
-                        <p className="text-green-400 mb-2">Mapping complete! LED positions shown.</p>
+                    </div>
+                  ) : mappingCompleted ? (
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between p-4 bg-gray-800 rounded-lg">
+                        <div className="text-white">
+                          <p className="text-green-400 font-medium">Mapping Complete!</p>
+                          <p className="text-sm text-gray-300">
+                            Found {mappedCoordinates.filter(c => c.x !== 0 || c.y !== 0).length} LEDs
+                          </p>
+                        </div>
                         <button
                           onClick={() => {
                             setMappingCompleted(false);
+                            setIsDrawingMode(false);
                             startWebcam();
                           }}
                           className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm"
@@ -550,8 +735,23 @@ const CameraPanel: React.FC = () => {
                           Return to Camera
                         </button>
                       </div>
-                    )}
-                  </div>
+                      
+                      <div className="overflow-auto max-h-[600px]">
+                        <DrawingCanvas
+                          ledCoordinates={mappedCoordinates}
+                          roi={roi || { x: 0, y: 0, width: originalVideoSize.width, height: originalVideoSize.height }}
+                          originalVideoWidth={originalVideoSize.width}
+                          originalVideoHeight={originalVideoSize.height}
+                          isDrawingMode={isDrawingMode}
+                          showLEDGrid={showLEDGrid}
+                          brushSize={brushSize}
+                          currentColor={currentColor}
+                          onDrawingComplete={() => {}}
+                          onLEDsUpdate={handleLEDsUpdate}
+                        />
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
               
@@ -695,6 +895,21 @@ const CameraPanel: React.FC = () => {
             </div>
           </CardContent>
         </Card>
+
+        {/* Drawing Tools Panel - Only show when mapping is completed */}
+        {mappingCompleted && roi && (
+          <DrawingToolsPanel
+            isDrawingMode={isDrawingMode}
+            showLEDGrid={showLEDGrid}
+            brushSize={brushSize}
+            currentColor={currentColor}
+            onDrawingModeToggle={handleDrawingModeToggle}
+            onLEDGridToggle={() => setShowLEDGrid(!showLEDGrid)}
+            onBrushSizeChange={setBrushSize}
+            onColorChange={setCurrentColor}
+            onClearAll={handleClearAll}
+          />
+        )}
       </div>
     </div>
   );

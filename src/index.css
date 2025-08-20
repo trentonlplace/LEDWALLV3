@@ -46,7 +46,7 @@ video {
   height: auto;
 }
 
-/* Canvas overlay styling */
-canvas {
+/* Canvas overlay styling - only for camera overlay canvas */
+video + canvas {
   pointer-events: none;
 }
