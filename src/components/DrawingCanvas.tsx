@@ -37,6 +37,7 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({
   const [currentLine, setCurrentLine] = useState<DrawingPoint[]>([]);
   const [lines, setLines] = useState<DrawingLine[]>([]);
   const [lastPoint, setLastPoint] = useState<DrawingPoint | null>(null);
+  const [lastLEDUpdate, setLastLEDUpdate] = useState<string>('');
 
   // Calculate canvas dimensions based on full video aspect ratio (not ROI)
   const videoAspectRatio = originalVideoWidth / originalVideoHeight;
@@ -140,11 +141,26 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({
     return Math.sqrt(dx * dx + dy * dy);
   }, []);
 
-  // Update LEDs based on drawn lines
+  // Update LEDs based on drawn lines - ONLY update affected LEDs
   const updateLEDsFromLines = useCallback((allLines: DrawingLine[]) => {
+    console.log('🎨 updateLEDsFromLines called with', allLines.length, 'lines');
+    
+    if (allLines.length === 0) {
+      console.log('🗑️ No lines - turning off all LEDs');
+      // Only when explicitly clearing all lines, turn off all LEDs
+      const ledUpdates = ledCoordinates.map((_, index) => ({
+        index,
+        color: { r: 0, g: 0, b: 0 }
+      }));
+      onLEDsUpdate(ledUpdates);
+      return;
+    }
+
     const averageDistance = calculateAverageDistance();
     const proximityThreshold = averageDistance / 2;
     const ledUpdates: { index: number; color: RGBColor }[] = [];
+
+    console.log('🔍 Checking LED proximity with threshold:', proximityThreshold);
 
     ledCoordinates.forEach((ledCoord, index) => {
       // Skip LEDs that weren't found
@@ -176,14 +192,15 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({
         }
       });
 
+      // ONLY update LEDs that are close to lines (affected LEDs)
       if (closestColor) {
         ledUpdates.push({ index, color: closestColor });
-      } else {
-        // Turn off LED if not close to any line
-        ledUpdates.push({ index, color: { r: 0, g: 0, b: 0 } });
       }
+      // Do NOT turn off LEDs that aren't close - leave them as they are
     });
 
+    console.log('💡 Updating', ledUpdates.length, 'affected LEDs (not all 64)');
+    console.log('🔍 Sample LED updates:', ledUpdates.slice(0, 3));
     onLEDsUpdate(ledUpdates);
   }, [ledCoordinates, calculateAverageDistance, distanceToLineSegment, onLEDsUpdate]);
 
@@ -270,6 +287,8 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({
   // Mouse event handlers
   const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     console.log('🖱️ MOUSE DOWN: isDrawingMode =', isDrawingMode);
+    console.log('🖱️ MOUSE DOWN: Event target =', e.currentTarget);
+    console.log('🖱️ MOUSE DOWN: Canvas dimensions =', e.currentTarget.width, 'x', e.currentTarget.height);
     if (!isDrawingMode) {
       console.log('❌ Drawing disabled - not in drawing mode');
       return;
@@ -342,8 +361,8 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({
       setLines(newLines);
       onDrawingComplete(newLines);
       
-      // Update LEDs immediately after drawing
-      console.log('💡 Updating LEDs from lines...');
+      // Update LEDs immediately when stroke is completed
+      console.log('💡 Stroke completed, updating LEDs now');
       updateLEDsFromLines(newLines);
     } else {
       console.log('⚠️ Line too short, not saving');
@@ -353,30 +372,24 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({
     setLastPoint(null);
   }, [isDrawing, currentLine, lines, currentColor, brushSize, onDrawingComplete, updateLEDsFromLines]);
 
-  // Clear all drawings
+  // Clear all drawings - this will trigger LED update via stroke completion logic
   const clearCanvas = useCallback(() => {
+    console.log('🗑️ CLEAR CANVAS: Clearing all lines');
     setLines([]);
     setCurrentLine([]);
     onDrawingComplete([]);
-    // Turn off all LEDs
-    const ledUpdates = ledCoordinates.map((_, index) => ({
-      index,
-      color: { r: 0, g: 0, b: 0 }
-    }));
-    onLEDsUpdate(ledUpdates);
-  }, [ledCoordinates, onDrawingComplete, onLEDsUpdate]);
+    // Trigger LED clear by calling updateLEDsFromLines with empty lines
+    console.log('🗑️ CLEAR CANVAS: Updating LEDs to turn all off');
+    updateLEDsFromLines([]);
+  }, [onDrawingComplete, updateLEDsFromLines]);
 
   // Effect to redraw canvas when state changes
   useEffect(() => {
     redrawCanvas();
   }, [redrawCanvas]);
 
-  // Effect to update LEDs when lines change
-  useEffect(() => {
-    if (lines.length > 0) {
-      updateLEDsFromLines(lines);
-    }
-  }, [lines, updateLEDsFromLines]);
+  // NOTE: Removed automatic LED clearing to prevent unwanted serial communications
+  // LEDs will only be updated on stroke completion or explicit clear button press
 
   return (
     <div className="relative">

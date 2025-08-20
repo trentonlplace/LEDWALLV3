@@ -115,6 +115,18 @@ export async function setLEDPixel(
 }
 
 /**
+ * Set multiple LED colors in batch for better performance
+ */
+export async function setLEDPixelsBatch(
+  pixels: Array<[number, number, number, number]> // [index, r, g, b]
+): Promise<{ ok: boolean }> {
+  return apiRequest<{ ok: boolean }>('/draw/led/batch', {
+    method: 'POST',
+    body: JSON.stringify({ pixels }),
+  });
+}
+
+/**
  * Health check API
  */
 export async function healthCheck(): Promise<{ status: string; serial_connected: boolean }> {

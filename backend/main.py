@@ -137,6 +137,47 @@ class SerialManager:
         cmd = f"PIXEL:{index},{r},{g},{b}"
         return self.send_command(cmd)
     
+    def set_pixel_fast(self, index: int, r: int, g: int, b: int) -> bool:
+        """Set a single pixel without waiting for response - for fast drawing"""
+        if not self.is_open():
+            if not self.connect():
+                return False
+        
+        cmd = f"PIXEL:{index},{r},{g},{b}\n"
+        
+        with self.lock:
+            try:
+                self.ser.write(cmd.encode('utf-8'))
+                self.ser.flush()  # Ensure data is sent immediately
+                # Small delay to prevent Arduino buffer overflow
+                time.sleep(0.001)  # 1ms delay
+                return True
+            except Exception as e:
+                print(f"Serial write error: {e}")
+                self.connected = False
+                return False
+    
+    def set_pixels_batch(self, pixel_updates: list) -> bool:
+        """Set multiple pixels in a batch for better performance"""
+        if not self.is_open():
+            if not self.connect():
+                return False
+        
+        with self.lock:
+            try:
+                for index, r, g, b in pixel_updates:
+                    cmd = f"PIXEL:{index},{r},{g},{b}\n"
+                    self.ser.write(cmd.encode('utf-8'))
+                    # Very small delay between commands to prevent buffer overflow
+                    time.sleep(0.001)  # 1ms between commands
+                
+                self.ser.flush()  # Ensure all data is sent
+                return True
+            except Exception as e:
+                print(f"Serial batch write error: {e}")
+                self.connected = False
+                return False
+    
     def set_all(self, r: int, g: int, b: int) -> bool:
         """Set all pixels to the same color"""
         cmd = f"ALL:{r},{g},{b}"
@@ -212,6 +253,9 @@ class LEDPixelReq(BaseModel):
     g: int  # 0-255 
     b: int  # 0-255
 
+class LEDBatchReq(BaseModel):
+    pixels: list  # List of [index, r, g, b] arrays
+
 # --------------- Device helpers -------------
 def _ensure_connected() -> None:
     if not sm.is_open():
@@ -267,10 +311,10 @@ def device_set(req: ManualSetReq):
 
 @app.post("/draw/led")
 def draw_led(req: LEDPixelReq):
-    """Set a single LED with RGB color for drawing"""
+    """Set a single LED with RGB color for drawing - optimized for speed"""
     try:
         _ensure_connected()
-        success = sm.set_pixel(req.index, req.r, req.g, req.b)
+        success = sm.set_pixel_fast(req.index, req.r, req.g, req.b)
         if not success:
             raise HTTPException(status_code=500, detail="Failed to set LED color")
         return {"ok": True}
@@ -278,6 +322,26 @@ def draw_led(req: LEDPixelReq):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LED control error: {str(e)}")
+
+@app.post("/draw/led/batch")
+def draw_led_batch(req: LEDBatchReq):
+    """Set multiple LEDs in a batch - most efficient for drawing"""
+    try:
+        _ensure_connected()
+        print(f"🚀 BATCH LED REQUEST: {len(req.pixels)} pixels")
+        print(f"🔍 First 3 pixels: {req.pixels[:3] if req.pixels else 'none'}")
+        
+        success = sm.set_pixels_batch(req.pixels)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to set LED colors")
+        
+        print(f"✅ BATCH LED SUCCESS: Updated {len(req.pixels)} LEDs")
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ BATCH LED ERROR: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"LED batch control error: {str(e)}")
 
 @app.get("/status")
 def status():

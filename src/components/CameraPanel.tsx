@@ -11,7 +11,7 @@ import {
   connectDevice as apiConnectDevice,
   toggleLEDPower,
   getMappingStatus,
-  setLEDPixel,
+  setLEDPixelsBatch,
 } from '../utils/api';
 import DrawingCanvas from './DrawingCanvas';
 import DrawingToolsPanel from './DrawingToolsPanel';
@@ -387,38 +387,61 @@ const CameraPanel: React.FC = () => {
     console.log(`🎉 DRAWING COMPLETE: Drew ${drawnCount} LEDs out of ${coordinates.length} total`);
   };
 
-  // Handle LED updates from drawing
+  // Handle LED updates from drawing - optimized batch updates
   const handleLEDsUpdate = useCallback(async (ledUpdates: { index: number; color: RGBColor }[]) => {
-    if (!isConnected) return;
+    console.log('📞 handleLEDsUpdate called with', ledUpdates.length, 'updates, isConnected =', isConnected);
+    if (!isConnected) {
+      console.log('❌ Device not connected, skipping LED updates');
+      return;
+    }
 
     try {
-      // Send LED updates in batches to avoid overwhelming the serial connection
-      for (const update of ledUpdates) {
-        await setLEDPixel({
-          index: update.index,
-          r: update.color.r,
-          g: update.color.g,
-          b: update.color.b
-        });
-        // Small delay between commands to prevent serial buffer overflow
-        await new Promise(resolve => setTimeout(resolve, 10));
+      console.log('🚀 Batch LED update: Sending', ledUpdates.length, 'LED updates');
+      console.log('🔍 Sample LED updates:', ledUpdates.slice(0, 3));
+      
+      // Convert to batch format: Array<[index, r, g, b]>
+      const pixels = ledUpdates.map(update => [
+        update.index,
+        update.color.r,
+        update.color.g,
+        update.color.b
+      ] as [number, number, number, number]);
+      
+      console.log('📦 Converted to batch format, sending to setLEDPixelsBatch');
+      console.log('🔍 Sample batch pixels:', pixels.slice(0, 3));
+      
+      // Send all LED updates in a single batch call
+      const result = await setLEDPixelsBatch(pixels);
+      
+      if (result.ok) {
+        console.log('✅ Batch LED update successful');
+      } else {
+        console.error('❌ Batch LED update failed', result);
       }
     } catch (error) {
-      console.error('Failed to update LEDs:', error);
+      console.error('❌ Failed to update LEDs:', error);
     }
   }, [isConnected]);
 
   // Drawing mode handlers
   const handleDrawingModeToggle = useCallback(() => {
     console.log('🎨 DRAWING MODE TOGGLE: Current mode:', isDrawingMode, '→ New mode:', !isDrawingMode);
-    setIsDrawingMode(!isDrawingMode);
-    if (!isDrawingMode) {
-      console.log('💡 Entering drawing mode - turning off all LEDs');
-      // Turn off all LEDs when entering drawing mode
-      handleLEDsUpdate(mappedCoordinates.map((_, index) => ({ 
+    console.log('🎨 DRAWING MODE TOGGLE: mappedCoordinates.length =', mappedCoordinates.length);
+    const newDrawingMode = !isDrawingMode;
+    setIsDrawingMode(newDrawingMode);
+    
+    if (newDrawingMode) {
+      console.log('💡 Entering drawing mode - LEDs will be controlled by strokes only');
+      // Don't automatically clear LEDs - let user control them through drawing
+    } else {
+      console.log('💡 Exiting drawing mode');
+      // Optionally clear LEDs when exiting drawing mode
+      const clearLEDUpdates = mappedCoordinates.map((_, index) => ({ 
         index, 
         color: { r: 0, g: 0, b: 0 } 
-      })));
+      }));
+      console.log('💡 Clearing LEDs on exit from drawing mode');
+      handleLEDsUpdate(clearLEDUpdates);
     }
   }, [isDrawingMode, mappedCoordinates, handleLEDsUpdate]);
 
