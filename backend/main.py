@@ -13,12 +13,13 @@ from serial.tools import list_ports
 
 # ------------------ Config ------------------
 CAM_INDEX = int(os.getenv("CAM_INDEX", "0"))
-NUM_LEDS = int(os.getenv("NUM_LEDS", "64"))
+NUM_LEDS = int(os.getenv("NUM_LEDS", "610"))  # Default 610 LEDs for the LED wall
+MAX_CONSECUTIVE_FAILURES = int(os.getenv("MAX_CONSECUTIVE_FAILURES", "5"))  # Stop after 5 consecutive failures
 SERIAL_PORT_ENV = os.getenv("SERIAL_PORT", None)  # e.g., /dev/tty.usbmodemXXXX
 BAUD = int(os.getenv("BAUD", "115200"))
 MIN_BRIGHTNESS = float(os.getenv("MIN_BRIGHTNESS", "0.1"))  # 10%
 MAX_BRIGHTNESS = float(os.getenv("MAX_BRIGHTNESS", "1.0"))  # 100%
-SETTLE_MS = int(os.getenv("SETTLE_MS", "150"))  # Time for LED to settle
+SETTLE_MS = int(os.getenv("SETTLE_MS", "50"))  # Time for LED to settle
 TOLERANCE = int(os.getenv("TOLERANCE", "2"))  # intensity wiggle room
 
 # --------------- Status (for live dots) -----
@@ -29,14 +30,27 @@ STATUS = {
     "w": 0,
     "h": 0,
     "roi": None,
-    "i": -1,
-    "total": 64,
+    "current_led": -1,
+    "total_leds": 0,  # Dynamic - discovered during mapping
+    "consecutive_failures": 0,
+    "adaptive_mode": True,
 }
 STATUS_LOCK = threading.Lock()
 
 def status_reset():
     # Note: Caller must hold STATUS_LOCK
-    STATUS.update({"running": True, "done": False, "coords": [], "w": 0, "h": 0, "roi": None, "i": -1})
+    STATUS.update({
+        "running": True, 
+        "done": False, 
+        "coords": [], 
+        "w": 0, 
+        "h": 0, 
+        "roi": None, 
+        "current_led": -1,
+        "total_leds": 0,
+        "consecutive_failures": 0,
+        "adaptive_mode": True
+    })
 
 def status_update(**kwargs):
     with STATUS_LOCK:
@@ -150,7 +164,7 @@ class SerialManager:
                 self.ser.write(cmd.encode('utf-8'))
                 self.ser.flush()  # Ensure data is sent immediately
                 # Small delay to prevent Arduino buffer overflow
-                time.sleep(0.001)  # 1ms delay
+                time.sleep(0.005)  # 5ms delay
                 return True
             except Exception as e:
                 print(f"Serial write error: {e}")
@@ -172,6 +186,27 @@ class SerialManager:
                     time.sleep(0.001)  # 1ms between commands
                 
                 self.ser.flush()  # Ensure all data is sent
+                return True
+            except Exception as e:
+                print(f"Serial batch write error: {e}")
+                self.connected = False
+                return False
+    
+    def set_pixels_batch(self, pixels: list) -> bool:
+        """Set multiple pixels using individual PIXEL commands"""
+        if not self.is_open():
+            if not self.connect():
+                return False
+        
+        with self.lock:
+            try:
+                for pixel in pixels:
+                    index, r, g, b = pixel
+                    cmd = f"PIXEL:{index},{r},{g},{b}\n"
+                    self.ser.write(cmd.encode('utf-8'))
+                    self.ser.flush()
+                    time.sleep(0.005)  # 5ms delay to prevent buffer overflow
+                
                 return True
             except Exception as e:
                 print(f"Serial batch write error: {e}")
@@ -232,6 +267,7 @@ class StartMapRequest(BaseModel):
     brightness: float  # 0..1
     ledPower: bool
     num_leds: Optional[int] = None
+    resume_from_led: Optional[int] = None  # Resume mapping from this LED index
 
 class MapResult(BaseModel):
     coords: List[Tuple[float, float]]  # normalized to full frame (0..1, 0..1)
@@ -267,7 +303,7 @@ def send_led_command(i: int, brightness: float):
     _ensure_connected()
     # Convert brightness (0..1) to RGB values (0..255)
     rgb_val = int(brightness * 255)
-    sm.set_pixel(i, 0, rgb_val, 0)  # Green LED at specified brightness
+    sm.set_pixel_fast(i, 0, rgb_val, 0)  # Green LED at specified brightness - using fast method for mapping
 
 def all_off():
     """Turn off all LEDs"""
@@ -292,15 +328,20 @@ def device_connect(req: ConnectReq):
 
 @app.post("/device/power")
 def device_power(req: PowerReq):
-    """Toggle LED power on/off"""
+    """Toggle LED power on/off - Controls all LEDs"""
     if req.on:
         _ensure_connected()
-        # Set a moderate brightness when turning on
-        sm.set_brightness(128)
-        # Turn all LEDs to green at moderate brightness
-        sm.set_all(0, 128, 0)
+        print(f"💡 TURNING ON ALL {NUM_LEDS} LEDS")
+        # Set a moderate brightness to avoid overwhelming power draw
+        sm.set_brightness(100)  # Moderate brightness for all LEDs
+        # Turn all LEDs to white (equal RGB values)
+        # Using lower values per channel to keep total power reasonable
+        sm.set_all(100, 100, 100)  # White at moderate brightness
+        print(f"✅ ALL {NUM_LEDS} LEDS ON: White at brightness 100")
     else:
+        print(f"🔌 TURNING OFF ALL {NUM_LEDS} LEDS")
         all_off()
+        print(f"✅ ALL {NUM_LEDS} LEDS OFF")
     return {"ok": True}
 
 @app.post("/device/set")
@@ -314,6 +355,7 @@ def draw_led(req: LEDPixelReq):
     """Set a single LED with RGB color for drawing - optimized for speed"""
     try:
         _ensure_connected()
+        # Use simple pixel method
         success = sm.set_pixel_fast(req.index, req.r, req.g, req.b)
         if not success:
             raise HTTPException(status_code=500, detail="Failed to set LED color")
@@ -331,6 +373,12 @@ def draw_led_batch(req: LEDBatchReq):
         print(f"🚀 BATCH LED REQUEST: {len(req.pixels)} pixels")
         print(f"🔍 First 3 pixels: {req.pixels[:3] if req.pixels else 'none'}")
         
+        # Debug: Log color values being sent 
+        for pixel in req.pixels[:3]:  # Log first 3 pixels for debugging
+            index, r, g, b = pixel
+            print(f"🎨 DEBUG: LED {index} -> R:{r} G:{g} B:{b}")
+        
+        # Use simple batch method with PIXEL commands
         success = sm.set_pixels_batch(req.pixels)
         if not success:
             raise HTTPException(status_code=500, detail="Failed to set LED colors")
@@ -464,33 +512,49 @@ def _mapping_worker(req: StartMapRequest):
     all_off()
     time.sleep(0.5)  # Let the LEDs settle
 
-    n_leds = int(req.num_leds or NUM_LEDS)
     base_brightness = float(np.clip(req.brightness, MIN_BRIGHTNESS, MAX_BRIGHTNESS))
     
     # Convert to Arduino brightness scale (0-255)
     arduino_brightness = int(base_brightness * 255)
     sm.set_brightness(arduino_brightness)
     
-    print(f"Starting mapping of {n_leds} LEDs with brightness {base_brightness}")
-    status_update(total=n_leds)
-
-    for i in range(n_leds):
-        print(f"\n💡 LED {i}: Starting mapping process")
-        status_update(i=i)
+    print(f"Starting adaptive LED mapping with brightness {base_brightness}")
+    print(f"Will stop after {MAX_CONSECUTIVE_FAILURES} consecutive failures")
+    
+    consecutive_failures = 0
+    led_index = req.resume_from_led if req.resume_from_led is not None else 0
+    
+    if req.resume_from_led is not None:
+        print(f"🔄 RESUME MODE: Starting from LED {req.resume_from_led}")
+    else:
+        print(f"🆕 NEW MAPPING: Starting from LED 0")
+    
+    while consecutive_failures < MAX_CONSECUTIVE_FAILURES:
+        print(f"\n💡 LED {led_index}: Starting mapping process")
+        status_update(current_led=led_index, consecutive_failures=consecutive_failures)
         current_brightness = base_brightness
         attempts = 0
         spot_found = False
 
-        print(f"🔆 LED {i}: Turning ON with brightness {current_brightness}")
-        # Turn on current LED
-        send_led_command(i, current_brightness)
-        print(f"⏳ LED {i}: Waiting {SETTLE_MS}ms for LED to stabilize")
-        time.sleep(SETTLE_MS / 1000.0)  # Wait for LED to stabilize
-
-        while attempts < 10 and not spot_found:
+        # Use timer-based approach: LED on for minimal duration since detection is fast
+        led_on_duration = 0.2  # 200ms total - detection happens in ~105ms
+        
+        print(f"🔆 LED {led_index}: Turning ON with brightness {current_brightness} for {led_on_duration*1000}ms")
+        send_led_command(led_index, current_brightness)
+        
+        # Start timer AFTER the LED command is sent
+        start_time = time.time()
+        
+        # Minimal settle time
+        time.sleep(0.05)  # 50ms settle
+        print(f"⏱️ LED {led_index}: Starting detection loop after {(time.time() - start_time)*1000:.0f}ms")
+        
+        while time.time() - start_time < led_on_duration and not spot_found:
+            elapsed = time.time() - start_time
+            print(f"🔍 LED {led_index}: Loop iteration at {elapsed*1000:.0f}ms")
             ok, frame = cap.read()
             if not ok:
-                print(f"Failed to read frame for LED {i}")
+                print(f"Failed to read frame for LED {led_index}")
                 break
             
             # Extract ROI
@@ -505,36 +569,76 @@ def _mapping_worker(req: StartMapRequest):
                 cx_full = rx + cx_roi
                 cy_full = ry + cy_roi
                 nx, ny = _normalize_point(cx_full, cy_full, W, H)
+                
+                # Just record the position, even if it overlaps with previous LEDs
                 coords.append((nx, ny))
                 status_append_coord(nx, ny)
                 spot_found = True
-                print(f"LED {i}: Found at ({nx:.3f}, {ny:.3f})")
+                consecutive_failures = 0  # Reset failure counter on success
+                print(f"✅ LED {led_index}: Found at ({nx:.3f}, {ny:.3f}) after {elapsed*1000:.0f}ms")
+                # Turn off LED immediately when found
+                send_led_command(led_index, 0.0)
+                break  # Exit detection loop immediately
             else:
-                # Reduce brightness and try again
-                current_brightness = max(MIN_BRIGHTNESS, current_brightness * 0.7)
-                send_led_command(i, current_brightness)
-                time.sleep(SETTLE_MS / 1000.0)
+                print(f"🔍 LED {led_index}: Attempt {attempts + 1} at {elapsed*1000:.0f}ms - not detected")
+                # Try reducing brightness if we still have time and not too many attempts
+                if elapsed < led_on_duration * 0.7 and attempts < 3:  # Only reduce brightness in first 70% of time, max 3 attempts
+                    current_brightness = max(MIN_BRIGHTNESS, current_brightness * 0.8)
+                    
+                    # If brightness hits minimum, stop trying immediately
+                    if current_brightness <= MIN_BRIGHTNESS:
+                        print(f"LED {led_index}: Brightness at minimum ({MIN_BRIGHTNESS}), giving up")
+                        break
+                        
+                    print(f"🔆 LED {led_index}: Reducing brightness to {current_brightness:.2f}")
+                    send_led_command(led_index, current_brightness)
+                    time.sleep(0.03)  # 30ms settle after brightness change
+                
                 attempts += 1
 
-        # Turn off current LED
-        send_led_command(i, 0.0)
-        time.sleep(50 / 1000.0)  # Brief pause between LEDs
+        # Turn off current LED (if not already turned off when found)
+        total_time = time.time() - start_time
+        if not spot_found:
+            send_led_command(led_index, 0.0)
+        # No delay between LEDs - immediate transition
 
         if not spot_found:
-            print(f"LED {i}: Not found after {attempts} attempts")
+            print(f"❌ LED {led_index}: Not found after {attempts} attempts in {total_time*1000:.0f}ms")
             coords.append((0.0, 0.0))
             status_append_coord(0.0, 0.0)
+            consecutive_failures += 1
+            print(f"Consecutive failures: {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}")
+        
+        led_index += 1
+        
+        # Update status with current progress
+        status_update(total_leds=led_index, consecutive_failures=consecutive_failures)
+    
+    print(f"\n🛑 Mapping stopped: {consecutive_failures} consecutive failures detected")
+    print(f"📊 Total LEDs processed: {led_index}")
+    print(f"✅ LEDs found: {len([c for c in coords if c != (0.0, 0.0)])}")
+    print(f"❌ LEDs not found: {len([c for c in coords if c == (0.0, 0.0)])}")
 
     cap.release()
     all_off()
 
     # Save mapping results
-    out = {"coords": coords, "roi": req.roi.dict(), "w": W, "h": H, "num_leds": n_leds}
+    total_found = len([c for c in coords if c != (0.0, 0.0)])
+    out = {
+        "coords": coords, 
+        "roi": req.roi.dict(), 
+        "w": W, 
+        "h": H, 
+        "total_leds": led_index,
+        "leds_found": total_found,
+        "adaptive_mode": True,
+        "consecutive_failures": consecutive_failures
+    }
     with open("mapping.json", "w") as f:
         json.dump(out, f, indent=2)
     
-    print(f"Mapping complete! Saved {len(coords)} LED positions to mapping.json")
-    status_update(done=True, running=False, i=-1)
+    print(f"Adaptive mapping complete! Saved {total_found}/{led_index} LED positions to mapping.json")
+    status_update(done=True, running=False, current_led=-1, total_leds=led_index)
 
 # --------------- Routes ---------------------
 @app.options("/start_mapping")
@@ -573,6 +677,61 @@ def start_mapping(req: StartMapRequest):
     th.start()
     print("✅ MAPPING INITIATED: Returning success response")
     return {"ok": True, "message": "Mapping started"}
+
+@app.post("/resume_mapping")
+def resume_mapping_from_led(resume_from: int, brightness: float = 0.5):
+    """Resume mapping from a specific LED index"""
+    print(f"\n🔄 RESUME_MAPPING REQUEST: From LED {resume_from} with brightness {brightness}")
+    
+    with STATUS_LOCK:
+        if STATUS.get("running"):
+            raise HTTPException(status_code=409, detail="Mapping already in progress")
+        
+        # Get the last successful ROI from status if available
+        last_roi = STATUS.get("roi")
+        if not last_roi:
+            raise HTTPException(status_code=400, detail="No previous mapping ROI found. Start a new mapping instead.")
+        
+        status_reset()
+    
+    # Create a request object for resuming
+    resume_req = StartMapRequest(
+        roi=ROI(
+            x=last_roi["x"],
+            y=last_roi["y"], 
+            w=last_roi["w"],
+            h=last_roi["h"]
+        ),
+        brightness=brightness,
+        ledPower=True,
+        resume_from_led=resume_from
+    )
+    
+    # Start the mapping worker thread
+    worker_thread = Thread(target=_mapping_worker, args=(resume_req,))
+    worker_thread.daemon = True
+    worker_thread.start()
+    
+    return {"ok": True, "message": f"Mapping resumed from LED {resume_from}"}
+
+@app.get("/load_mapping")
+def load_mapping():
+    """Load existing mapping data from mapping.json file"""
+    try:
+        import os
+        if not os.path.exists("mapping.json"):
+            raise HTTPException(status_code=404, detail="No mapping file found. Please complete a mapping first.")
+        
+        with open("mapping.json", "r") as f:
+            mapping_data = json.load(f)
+        
+        print(f"📁 LOAD_MAPPING: Loaded {len(mapping_data.get('coordinates', []))} LED coordinates from mapping.json")
+        return mapping_data
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Invalid mapping file format")
+    except Exception as e:
+        print(f"❌ LOAD_MAPPING ERROR: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to load mapping: {str(e)}")
 
 @app.get("/")
 def root():

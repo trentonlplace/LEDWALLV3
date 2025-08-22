@@ -1,6 +1,6 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import { Card, CardHeader, CardContent, CardTitle } from './ui/card';
-import type { RGBColor, HSLColor } from '../types';
+import type { RGBColor, HSLColor, LEDMappingFile } from '../types';
 
 interface DrawingToolsPanelProps {
   isDrawingMode: boolean;
@@ -12,6 +12,9 @@ interface DrawingToolsPanelProps {
   onBrushSizeChange: (size: number) => void;
   onColorChange: (color: RGBColor) => void;
   onClearAll: () => void;
+  onExportMapping: () => void;
+  onImportMapping: (mappingData: LEDMappingFile) => void;
+  hasMapping: boolean;
 }
 
 const DrawingToolsPanel: React.FC<DrawingToolsPanelProps> = ({
@@ -23,10 +26,14 @@ const DrawingToolsPanel: React.FC<DrawingToolsPanelProps> = ({
   onLEDGridToggle,
   onBrushSizeChange,
   onColorChange,
-  onClearAll
+  onClearAll,
+  onExportMapping,
+  onImportMapping,
+  hasMapping
 }) => {
   const [colorMode, setColorMode] = useState<'rgb' | 'hsl'>('rgb');
   const [hslColor, setHslColor] = useState<HSLColor>({ h: 0, s: 100, l: 50 });
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Convert RGB to HSL
   const rgbToHsl = useCallback((r: number, g: number, b: number): HSLColor => {
@@ -109,6 +116,108 @@ const DrawingToolsPanel: React.FC<DrawingToolsPanelProps> = ({
     const newRgbColor = hslToRgb(newHslColor.h, newHslColor.s, newHslColor.l);
     onColorChange(newRgbColor);
   }, [hslColor, hslToRgb, onColorChange]);
+
+  // Handle file import
+  const handleFileImport = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Check file type
+    if (!file.name.toLowerCase().endsWith('.json')) {
+      alert('Please select a JSON file.');
+      return;
+    }
+
+    // Check file size (limit to 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      alert('File is too large. Please select a file smaller than 10MB.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const jsonData = JSON.parse(e.target?.result as string) as LEDMappingFile;
+        
+        // Validate the JSON structure
+        if (!validateMappingFile(jsonData)) {
+          alert('Invalid mapping file format. Please select a valid LED mapping JSON file.');
+          return;
+        }
+
+        // Call the import handler
+        onImportMapping(jsonData);
+        
+        // Clear the file input for future imports
+        if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+        }
+        
+        alert(`Mapping loaded successfully!\n${jsonData.metadata.name}\nLEDs: ${jsonData.metadata.validLeds}/${jsonData.metadata.totalLeds}`);
+      } catch (error) {
+        console.error('Error parsing JSON file:', error);
+        alert('Error reading file. Please ensure it is a valid JSON file.');
+      }
+    };
+
+    reader.onerror = () => {
+      alert('Error reading file. Please try again.');
+    };
+
+    reader.readAsText(file);
+  }, [onImportMapping]);
+
+  // Validate mapping file structure
+  const validateMappingFile = useCallback((data: any): data is LEDMappingFile => {
+    if (!data || typeof data !== 'object') return false;
+    
+    // Check required top-level properties
+    if (!data.version || !data.metadata || !data.canvas || !data.roi || !data.originalROI || !Array.isArray(data.leds)) {
+      return false;
+    }
+
+    // Check metadata structure
+    const meta = data.metadata;
+    if (!meta.name || typeof meta.totalLeds !== 'number' || typeof meta.validLeds !== 'number') {
+      return false;
+    }
+
+    // Check canvas structure
+    const canvas = data.canvas;
+    if (typeof canvas.width !== 'number' || typeof canvas.height !== 'number') {
+      return false;
+    }
+
+    // Check ROI structure
+    const roi = data.roi;
+    if (typeof roi.x !== 'number' || typeof roi.y !== 'number' || 
+        typeof roi.width !== 'number' || typeof roi.height !== 'number') {
+      return false;
+    }
+
+    // Check originalROI structure
+    const origRoi = data.originalROI;
+    if (typeof origRoi.x !== 'number' || typeof origRoi.y !== 'number' || 
+        typeof origRoi.width !== 'number' || typeof origRoi.height !== 'number' ||
+        typeof origRoi.videoWidth !== 'number' || typeof origRoi.videoHeight !== 'number') {
+      return false;
+    }
+
+    // Check LEDs array structure (sample check for performance)
+    if (data.leds.length > 0) {
+      const sampleLed = data.leds[0];
+      if (typeof sampleLed.index !== 'number' || typeof sampleLed.x !== 'number' || typeof sampleLed.y !== 'number') {
+        return false;
+      }
+    }
+
+    return true;
+  }, []);
+
+  // Trigger file input
+  const triggerFileInput = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
 
   // Preset colors
   const presetColors: RGBColor[] = [
@@ -336,12 +445,40 @@ const DrawingToolsPanel: React.FC<DrawingToolsPanelProps> = ({
 
         {/* Action Buttons */}
         <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={triggerFileInput}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
+            >
+              Import
+            </button>
+            <button
+              onClick={onExportMapping}
+              disabled={!hasMapping}
+              className={`px-4 py-2 rounded-lg font-medium ${
+                hasMapping
+                  ? 'bg-green-600 text-white hover:bg-green-700'
+                  : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+              }`}
+            >
+              Export
+            </button>
+          </div>
           <button
             onClick={onClearAll}
             className="w-full px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium"
           >
             Clear All
           </button>
+          
+          {/* Hidden file input */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            onChange={handleFileImport}
+            className="hidden"
+          />
         </div>
       </CardContent>
     </Card>

@@ -26,6 +26,8 @@ export interface MappingStatus {
   status?: 'idle' | 'mapping' | 'completed' | 'error';
   current_led?: number;
   total_leds?: number;
+  consecutive_failures?: number;
+  adaptive_mode?: boolean;
   coordinates?: LEDCoordinate[];
   message?: string;
 }
@@ -55,7 +57,8 @@ export interface StartMappingRequest {
   };
   brightness: number;
   ledPower: boolean;
-  num_leds: number;
+  num_leds?: number; // Optional - adaptive mapping will discover LED count
+  resume_from_led?: number; // Optional - resume mapping from this LED index
 }
 
 export interface StartMappingResponse {
@@ -125,4 +128,51 @@ export interface DrawingToolState {
   brushSize: number;
   currentColor: RGBColor;
   lines: DrawingLine[];
+}
+
+// LED Mapping JSON file format interfaces
+export interface LEDMappingMetadata {
+  name: string;
+  created: string;
+  totalLeds: number;
+  validLeds: number;
+  arrayStructure?: {
+    wiring: string;
+  };
+}
+
+export interface LEDMappingCanvas {
+  width: number;
+  height: number;
+}
+
+export interface LEDMappingROI {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface LEDMappingOriginalROI {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  videoWidth: number;
+  videoHeight: number;
+}
+
+export interface LEDMappingLED {
+  index: number;
+  x: number;
+  y: number;
+}
+
+export interface LEDMappingFile {
+  version: string;
+  metadata: LEDMappingMetadata;
+  canvas: LEDMappingCanvas;
+  roi: LEDMappingROI;
+  originalROI: LEDMappingOriginalROI;
+  leds: LEDMappingLED[];
 }

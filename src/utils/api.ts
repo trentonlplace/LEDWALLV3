@@ -127,6 +127,22 @@ export async function setLEDPixelsBatch(
 }
 
 /**
+ * Load existing mapping data from backend
+ */
+export async function loadMapping(): Promise<{
+  coords: number[][];
+  roi: { x: number; y: number; w: number; h: number };
+  w: number;
+  h: number;
+  total_leds: number;
+  leds_found: number;
+  adaptive_mode: boolean;
+  consecutive_failures: number;
+}> {
+  return apiRequest('/load_mapping');
+}
+
+/**
  * Health check API
  */
 export async function healthCheck(): Promise<{ status: string; serial_connected: boolean }> {

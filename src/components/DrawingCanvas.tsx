@@ -22,7 +22,6 @@ interface DrawingCanvasProps {
 
 const DrawingCanvas: React.FC<DrawingCanvasProps> = ({
   ledCoordinates,
-  roi,
   originalVideoWidth,
   originalVideoHeight,
   isDrawingMode,
@@ -37,7 +36,6 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({
   const [currentLine, setCurrentLine] = useState<DrawingPoint[]>([]);
   const [lines, setLines] = useState<DrawingLine[]>([]);
   const [lastPoint, setLastPoint] = useState<DrawingPoint | null>(null);
-  const [lastLEDUpdate, setLastLEDUpdate] = useState<string>('');
 
   // Calculate canvas dimensions based on full video aspect ratio (not ROI)
   const videoAspectRatio = originalVideoWidth / originalVideoHeight;
@@ -403,9 +401,7 @@ const DrawingCanvas: React.FC<DrawingCanvasProps> = ({
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
         style={{
-          cursor: isDrawingMode ? 'crosshair' : 'default',
-          width: '100%',
-          height: 'auto'
+          cursor: isDrawingMode ? 'crosshair' : 'default'
         }}
       />
       

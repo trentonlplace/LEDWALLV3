@@ -1,0 +1,40 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "name": "Sample LED Mapping Test",
+    "created": "2025-08-20T21:10:00.000Z",
+    "totalLeds": 10,
+    "validLeds": 8,
+    "arrayStructure": {
+      "wiring": "unknown"
+    }
+  },
+  "canvas": {
+    "width": 160,
+    "height": 90
+  },
+  "roi": {
+    "x": 35,
+    "y": 0,
+    "width": 90,
+    "height": 90
+  },
+  "originalROI": {
+    "x": 320,
+    "y": 115,
+    "width": 640,
+    "height": 640,
+    "videoWidth": 1280,
+    "videoHeight": 720
+  },
+  "leds": [
+    {"index": 0, "x": 42, "y": 8},
+    {"index": 1, "x": 52, "y": 18},
+    {"index": 2, "x": 62, "y": 28},
+    {"index": 3, "x": 72, "y": 38},
+    {"index": 4, "x": 82, "y": 48},
+    {"index": 5, "x": 92, "y": 58},
+    {"index": 6, "x": 102, "y": 68},
+    {"index": 7, "x": 112, "y": 78}
+  ]
+}

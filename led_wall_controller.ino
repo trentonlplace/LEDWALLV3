@@ -50,7 +50,7 @@
 
      // ===== LED Task =====
      void ledControlTask(void* param) {
-       FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, LED_COUNT);
+       FastLED.addLeds<WS2812B, DATA_PIN, RGB>(leds, LED_COUNT);
        FastLED.setBrightness(BRIGHTNESS);
 
        // Startup test - quick flash
@@ -212,6 +212,68 @@
            Serial.println("ERROR:invalid_index");
          }
 
+       } else if (cmdType == "patch") {
+         // PATCH:count:index,r,g,b:index,r,g,b:...
+         // Parse the count first
+         int firstColon = payload.indexOf(':');
+         if (firstColon == -1) {
+           Serial.println("ERROR:invalid_patch_format");
+           return;
+         }
+         
+         int count = payload.substring(0, firstColon).toInt();
+         if (count <= 0 || count > PatchMsg::MAX_PATCH) {
+           Serial.println("ERROR:invalid_patch_count");
+           return;
+         }
+         
+         PatchMsg msg;
+         msg.count = count;
+         
+         // Parse each pixel: index,r,g,b
+         String remaining = payload.substring(firstColon + 1);
+         for (int i = 0; i < count; i++) {
+           int nextColon = remaining.indexOf(':');
+           String pixelData;
+           
+           if (nextColon == -1 && i == count - 1) {
+             // Last pixel
+             pixelData = remaining;
+           } else if (nextColon > 0) {
+             pixelData = remaining.substring(0, nextColon);
+             remaining = remaining.substring(nextColon + 1);
+           } else {
+             Serial.println("ERROR:invalid_pixel_data");
+             return;
+           }
+           
+           // Parse index,r,g,b
+           int comma1 = pixelData.indexOf(',');
+           int comma2 = pixelData.indexOf(',', comma1 + 1);
+           int comma3 = pixelData.indexOf(',', comma2 + 1);
+           
+           if (comma1 > 0 && comma2 > comma1 && comma3 > comma2) {
+             int index = pixelData.substring(0, comma1).toInt();
+             int r = pixelData.substring(comma1 + 1, comma2).toInt();
+             int g = pixelData.substring(comma2 + 1, comma3).toInt();
+             int b = pixelData.substring(comma3 + 1).toInt();
+             
+             if (index >= 0 && index < LED_COUNT) {
+               msg.idx[i] = index;
+               msg.col[i] = CRGB(r, g, b);
+             } else {
+               Serial.println("ERROR:invalid_index_in_patch");
+               return;
+             }
+           } else {
+             Serial.println("ERROR:invalid_pixel_format");
+             return;
+           }
+         }
+         
+         xQueueSend(patchQueue, &msg, 0);
+         Serial.println("OK:patch_applied");
+
        } else if (cmdType == "bright") {
          // BRIGHT:0-255
          int brightness = payload.toInt();
@@ -236,6 +298,7 @@
        Serial.println("Commands:");
        Serial.println("  CLEAR: - Clear all LEDs");
        Serial.println("  PIXEL:index,r,g,b - Set LED at index");
+       Serial.println("  PATCH:count:index,r,g,b:index,r,g,b:... - Set multiple LEDs");
        Serial.println("  ALL:r,g,b - Set all LEDs");
        Serial.println("  BLINK:index - Blink LED");
        Serial.println("  BRIGHT:0-255 - Set brightness");

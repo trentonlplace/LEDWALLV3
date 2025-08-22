@@ -22,7 +22,7 @@ pip install -r requirements.txt
 
 # Set environment variables
 export CAM_INDEX=0
-export NUM_LEDS=300
+export NUM_LEDS=300  # Total number of LEDs in the wall
 export BAUD=115200
 export MIN_BRIGHTNESS=0.1
 export SETTLE_MS=150

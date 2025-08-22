@@ -27,7 +27,7 @@ export const LED_CONFIG = {
 
 // UI Configuration
 export const UI_CONFIG = {
-  POLLING_INTERVAL: 250, // 250ms for status updates
+  POLLING_INTERVAL: 1000, // 1000ms for status updates - reduced from 250ms for better LED mapping performance
   ROI_STROKE_COLOR: '#0ea5e9', // sky-500
   ROI_STROKE_WIDTH: 2,
 } as const;

@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Card, CardHeader, CardContent, CardTitle } from './ui/card';
-import type { ROI, LEDCoordinate, MappingStatus, RGBColor } from '../types';
+import type { ROI, LEDCoordinate, MappingStatus, RGBColor, LEDMappingFile } from '../types';
 import { CAMERA_CONFIG, LED_CONFIG, UI_CONFIG, ERROR_MESSAGES, SUCCESS_MESSAGES } from '../config/constants';
 import {
   requestCameraAccess,
@@ -12,6 +12,7 @@ import {
   toggleLEDPower,
   getMappingStatus,
   setLEDPixelsBatch,
+  loadMapping,
 } from '../utils/api';
 import DrawingCanvas from './DrawingCanvas';
 import DrawingToolsPanel from './DrawingToolsPanel';
@@ -242,7 +243,7 @@ const CameraPanel: React.FC = () => {
         roi: normalizedRoi,
         brightness: brightness / 100, // Convert percentage to 0-1
         ledPower: ledPower,
-        num_leds: LED_CONFIG.DEFAULT_COUNT
+        // num_leds removed - using adaptive mapping
       };
       console.log('🔍 DEBUG: Request payload =', requestPayload);
       
@@ -274,6 +275,63 @@ const CameraPanel: React.FC = () => {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       alert(`Failed to start mapping: ${errorMessage}`);
       startWebcam(); // Restart webcam if mapping failed
+    }
+  };
+
+  // Resume mapping from specific LED index
+  const resumeMapping = async () => {
+    console.log('🔄 RESUME MAPPING: Button clicked');
+    
+    if (!isConnected) {
+      alert(ERROR_MESSAGES.DEVICE_CONNECT_FIRST);
+      return;
+    }
+
+    if (!mappingStatus?.current_led || mappingStatus.current_led <= 0) {
+      alert('No previous mapping session found to resume from.');
+      return;
+    }
+
+    const resumeFromLed = mappingStatus.current_led;
+    console.log(`🔄 RESUME: Continuing from LED ${resumeFromLed}`);
+
+    try {
+      // Stop webcam before backend takes control
+      console.log('📹 STOPPING WEBCAM: Before resume API call');
+      stopWebcam();
+      
+      // Wait for camera to be fully released
+      console.log('⏳ WAITING: 2 seconds for camera to be fully released');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      const response = await fetch(`http://localhost:8000/resume_mapping?resume_from=${resumeFromLed}&brightness=${brightness}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        const errorData = await response.text();
+        throw new Error(`Resume mapping failed: ${errorData}`);
+      }
+
+      console.log('✅ RESUME SUCCESS: Mapping resumed successfully');
+      setIsMapping(true);
+
+      // Start polling for mapping status
+      const interval = setInterval(async () => {
+        await pollMappingStatus();
+      }, 1000);
+
+      // Store interval for cleanup
+      (window as any).mappingInterval = interval;
+      
+    } catch (error) {
+      console.error('❌ RESUME ERROR: Exception caught', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      alert(`Failed to resume mapping: ${errorMessage}`);
+      startWebcam(); // Restart webcam if resume failed
     }
   };
 
@@ -452,6 +510,229 @@ const CameraPanel: React.FC = () => {
       color: { r: 0, g: 0, b: 0 } 
     })));
   }, [mappedCoordinates, handleLEDsUpdate]);
+
+  // Load existing mapping data from backend
+  const handleLoadMapping = useCallback(async () => {
+    try {
+      console.log('📁 Loading mapping data from backend...');
+      const mappingData = await loadMapping();
+      console.log('📁 Loaded mapping data:', mappingData);
+      
+      // Convert coordinates to the expected format
+      const coordinates = mappingData.coords.map(([x, y]) => ({ x, y }));
+      console.log('📁 Converted coordinates:', coordinates.length, 'LEDs');
+      
+      // Update state with loaded data
+      setMappedCoordinates(coordinates);
+      setRoi({
+        x: mappingData.roi.x,
+        y: mappingData.roi.y,
+        width: mappingData.roi.w,
+        height: mappingData.roi.h
+      });
+      
+      // Set the original video dimensions from loaded mapping
+      setOriginalVideoSize({
+        width: mappingData.w,
+        height: mappingData.h
+      });
+      
+      setMappingCompleted(true);
+      
+      console.log('✅ Mapping data loaded successfully');
+      alert(`Mapping loaded successfully! ${coordinates.length} LEDs mapped.`);
+    } catch (error) {
+      console.error('❌ Failed to load mapping:', error);
+      alert('Failed to load mapping. Please complete a mapping first.');
+    }
+  }, []);
+
+  // Export mapping to JSON file
+  const exportMapping = useCallback(() => {
+    if (mappedCoordinates.length === 0) {
+      alert('No mapping data to export. Please complete a mapping first.');
+      return;
+    }
+
+    if (!roi) {
+      alert('No ROI data available. Cannot export mapping.');
+      return;
+    }
+
+    // Calculate ROI placement on normalized 160x90 canvas
+    const canvasWidth = 160;
+    const canvasHeight = 90;
+    const canvasAspect = canvasWidth / canvasHeight; // 1.777...
+    const roiAspect = roi.width / roi.height;
+    
+    let scaledWidth, scaledHeight, offsetX, offsetY;
+    
+    if (roiAspect > canvasAspect) {
+      // ROI is wider - fit to width
+      scaledWidth = canvasWidth;
+      scaledHeight = canvasWidth / roiAspect;
+      offsetX = 0;
+      offsetY = (canvasHeight - scaledHeight) / 2;
+    } else {
+      // ROI is taller - fit to height
+      scaledHeight = canvasHeight;
+      scaledWidth = canvasHeight * roiAspect;
+      offsetX = (canvasWidth - scaledWidth) / 2;
+      offsetY = 0;
+    }
+
+    const roiPlacement = {
+      x: offsetX,
+      y: offsetY,
+      width: scaledWidth,
+      height: scaledHeight
+    };
+
+    // Convert LED coordinates to normalized canvas positions
+    const normalizedLEDs = mappedCoordinates.map((coord, index) => {
+      // Skip invalid coordinates (0,0 means LED not found)
+      if (coord.x === 0 && coord.y === 0) {
+        return null;
+      }
+
+      // Convert from normalized video coordinates (0-1) to canvas coordinates
+      const canvasX = roiPlacement.x + (coord.x * roiPlacement.width);
+      const canvasY = roiPlacement.y + (coord.y * roiPlacement.height);
+
+      return {
+        index,
+        x: Math.round(canvasX),
+        y: Math.round(canvasY)
+      };
+    }).filter(led => led !== null); // Remove invalid LEDs
+
+    // Create mapping JSON in the standardized format
+    const mapping = {
+      version: "1.0",
+      metadata: {
+        name: `LED Mapping ${new Date().toLocaleDateString()}`,
+        created: new Date().toISOString(),
+        totalLeds: mappedCoordinates.length,
+        validLeds: normalizedLEDs.length,
+        arrayStructure: {
+          wiring: "unknown" // Could be enhanced later
+        }
+      },
+      canvas: {
+        width: canvasWidth,
+        height: canvasHeight
+      },
+      roi: {
+        x: Math.round(roiPlacement.x),
+        y: Math.round(roiPlacement.y),
+        width: Math.round(roiPlacement.width),
+        height: Math.round(roiPlacement.height)
+      },
+      originalROI: {
+        x: roi.x,
+        y: roi.y,
+        width: roi.width,
+        height: roi.height,
+        videoWidth: originalVideoSize.width,
+        videoHeight: originalVideoSize.height
+      },
+      leds: normalizedLEDs
+    };
+
+    // Create and download the JSON file
+    const jsonString = JSON.stringify(mapping, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `led-mapping-${Date.now()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    console.log('🎉 MAPPING EXPORTED:', {
+      totalLEDs: mapping.metadata.totalLeds,
+      validLEDs: mapping.metadata.validLeds,
+      roiPlacement,
+      canvasSize: `${canvasWidth}x${canvasHeight}`,
+      filename: link.download
+    });
+
+    alert(`Mapping exported successfully!\nValid LEDs: ${mapping.metadata.validLeds}/${mapping.metadata.totalLeds}\nFile: ${link.download}`);
+  }, [mappedCoordinates, roi, originalVideoSize]);
+
+  // Import mapping from JSON file
+  const importMapping = useCallback((mappingData: LEDMappingFile) => {
+    console.log('🔄 IMPORT MAPPING: Starting import process', mappingData);
+    
+    try {
+      // Convert normalized LED coordinates back to coordinate system used by the application
+      const convertedCoordinates: LEDCoordinate[] = [];
+      
+      // Get ROI placement from the loaded mapping
+      const roiPlacement = mappingData.roi;
+      
+      // Convert each LED coordinate
+      mappingData.leds.forEach((led) => {
+        // Convert from canvas coordinates back to normalized coordinates (0-1)
+        const normalizedX = (led.x - roiPlacement.x) / roiPlacement.width;
+        const normalizedY = (led.y - roiPlacement.y) / roiPlacement.height;
+        
+        // Ensure coordinates are within valid range (0-1)
+        const clampedX = Math.max(0, Math.min(1, normalizedX));
+        const clampedY = Math.max(0, Math.min(1, normalizedY));
+        
+        // Expand the array to the correct index (fill gaps with {x: 0, y: 0})
+        while (convertedCoordinates.length <= led.index) {
+          convertedCoordinates.push({ x: 0, y: 0 });
+        }
+        
+        convertedCoordinates[led.index] = {
+          x: clampedX,
+          y: clampedY
+        };
+      });
+      
+      // Set the mapped coordinates
+      setMappedCoordinates(convertedCoordinates);
+      
+      // Restore the original ROI from the mapping file
+      const restoredROI: ROI = {
+        x: mappingData.originalROI.x,
+        y: mappingData.originalROI.y,
+        width: mappingData.originalROI.width,
+        height: mappingData.originalROI.height
+      };
+      setRoi(restoredROI);
+      
+      // Set the original video size
+      setOriginalVideoSize({
+        width: mappingData.originalROI.videoWidth,
+        height: mappingData.originalROI.videoHeight
+      });
+      
+      // Set mapping as completed
+      setMappingCompleted(true);
+      setIsMapping(false);
+      
+      // Draw the mapping results on the canvas
+      drawMappingResults(convertedCoordinates);
+      
+      console.log('✅ IMPORT COMPLETE:', {
+        totalLEDs: mappingData.metadata.totalLeds,
+        validLEDs: mappingData.metadata.validLeds,
+        convertedLEDs: convertedCoordinates.length,
+        roi: restoredROI,
+        videoSize: `${mappingData.originalROI.videoWidth}x${mappingData.originalROI.videoHeight}`
+      });
+      
+    } catch (error) {
+      console.error('❌ IMPORT ERROR:', error);
+      alert('Error importing mapping file. Please check the file format and try again.');
+    }
+  }, [drawMappingResults]);
 
   // Mouse handlers for ROI selection
   const handleMouseDown = (e: React.MouseEvent<HTMLVideoElement>) => {
@@ -732,8 +1013,20 @@ const CameraPanel: React.FC = () => {
                       <div className="absolute top-4 left-4 text-white">
                         <div>
                           <p>Mapping in progress...</p>
-                          {mappingStatus?.current_led && mappingStatus?.total_leds && (
-                            <p>LED {mappingStatus.current_led} of {mappingStatus.total_leds}</p>
+                          {mappingStatus?.current_led !== undefined && (
+                            <>
+                              <p>Testing LED {mappingStatus.current_led}</p>
+                              {mappingStatus?.adaptive_mode && (
+                                <p className="text-sm text-gray-400">
+                                  Adaptive mode: {mappingStatus.consecutive_failures || 0}/5 consecutive failures
+                                </p>
+                              )}
+                              {mappingStatus?.total_leds && (
+                                <p className="text-sm text-gray-300">
+                                  Found: {mappingStatus.total_leds} LEDs
+                                </p>
+                              )}
+                            </>
                           )}
                         </div>
                       </div>
@@ -904,11 +1197,39 @@ const CameraPanel: React.FC = () => {
                 {isMapping ? 'Mapping...' : 'Start Mapping'}
               </button>
 
+              {/* Load Existing Mapping Button */}
+              <button
+                onClick={handleLoadMapping}
+                disabled={!isConnected || isMapping}
+                className="w-full px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+              >
+                Load Existing Mapping
+              </button>
+
+              {/* Resume Mapping Button - Show if there's a previous session */}
+              {mappingStatus?.current_led && mappingStatus.current_led > 0 && !isMapping && (
+                <button
+                  onClick={resumeMapping}
+                  disabled={!isConnected || isMapping}
+                  className="w-full px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                >
+                  Resume from LED {mappingStatus.current_led}
+                </button>
+              )}
+
               {mappingStatus && (
                 <div className="text-sm">
                   <p><strong>Status:</strong> {mappingStatus.status}</p>
-                  {mappingStatus.current_led && mappingStatus.total_leds && (
-                    <p><strong>Progress:</strong> {mappingStatus.current_led}/{mappingStatus.total_leds}</p>
+                  {mappingStatus.current_led !== undefined && (
+                    <>
+                      <p><strong>Current LED:</strong> {mappingStatus.current_led}</p>
+                      {mappingStatus.adaptive_mode && (
+                        <p><strong>Failures:</strong> {mappingStatus.consecutive_failures || 0}/5</p>
+                      )}
+                      {mappingStatus.total_leds && (
+                        <p><strong>LEDs Found:</strong> {mappingStatus.total_leds}</p>
+                      )}
+                    </>
                   )}
                   {mappingStatus.coordinates && (
                     <p><strong>LEDs Found:</strong> {mappingStatus.coordinates.length}</p>
@@ -919,20 +1240,56 @@ const CameraPanel: React.FC = () => {
           </CardContent>
         </Card>
 
-        {/* Drawing Tools Panel - Only show when mapping is completed */}
-        {mappingCompleted && roi && (
-          <DrawingToolsPanel
-            isDrawingMode={isDrawingMode}
-            showLEDGrid={showLEDGrid}
-            brushSize={brushSize}
-            currentColor={currentColor}
-            onDrawingModeToggle={handleDrawingModeToggle}
-            onLEDGridToggle={() => setShowLEDGrid(!showLEDGrid)}
-            onBrushSizeChange={setBrushSize}
-            onColorChange={setCurrentColor}
-            onClearAll={handleClearAll}
-          />
+        {/* Mapping Info Panel - Show LED count when mapping is loaded */}
+        {mappingCompleted && mappedCoordinates.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>LED Mapping Status</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span>Total LEDs:</span>
+                  <span className="font-medium">{mappedCoordinates.length}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Valid LEDs:</span>
+                  <span className="font-medium text-green-600">
+                    {mappedCoordinates.filter(coord => coord.x !== 0 || coord.y !== 0).length}
+                  </span>
+                </div>
+                {roi && (
+                  <div className="flex justify-between">
+                    <span>ROI:</span>
+                    <span className="font-medium">
+                      {Math.round(roi.width)}×{Math.round(roi.height)}
+                    </span>
+                  </div>
+                )}
+                <div className="flex justify-between">
+                  <span>Status:</span>
+                  <span className="font-medium text-green-600">Ready for Drawing</span>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
         )}
+
+        {/* Drawing Tools Panel - Always show, but conditionally enable export */}
+        <DrawingToolsPanel
+          isDrawingMode={isDrawingMode}
+          showLEDGrid={showLEDGrid}
+          brushSize={brushSize}
+          currentColor={currentColor}
+          onDrawingModeToggle={handleDrawingModeToggle}
+          onLEDGridToggle={() => setShowLEDGrid(!showLEDGrid)}
+          onBrushSizeChange={setBrushSize}
+          onColorChange={setCurrentColor}
+          onClearAll={handleClearAll}
+          onExportMapping={exportMapping}
+          onImportMapping={importMapping}
+          hasMapping={mappingCompleted && mappedCoordinates.length > 0}
+        />
       </div>
     </div>
   );
